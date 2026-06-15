@@ -1,0 +1,2 @@
+com.agilefreaks.keycloak.auth.EmailLookupOrCreateAuthenticatorFactory
+com.agilefreaks.keycloak.auth.SetEmailVerifiedAuthenticatorFactory
