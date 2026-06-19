@@ -11,12 +11,14 @@ import static org.mockito.Mockito.when;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.authenticators.browser.AbstractUsernameFormAuthenticator;
 import org.keycloak.forms.login.LoginFormsProvider;
 import org.keycloak.http.HttpRequest;
+import org.keycloak.models.AuthenticatorConfigModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -148,7 +150,93 @@ class EmailLookupOrCreateAuthenticatorTest {
   }
 
   @Test
+  void action_rejectsWhenHoneypotFilled_noCreate() {
+    withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, "company_url"));
+    formData.putSingle("username", "real@example.com");
+    formData.putSingle("company_url", "http://spam.example"); // bot filled the trap
+
+    auth.action(ctx);
+
+    verify(ctx).challenge(any());
+    verify(ctx, never()).success();
+    verify(users, never()).addUser(any(), anyString());
+  }
+
+  @Test
+  void action_proceedsWhenHoneypotEmpty() {
+    withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, "company_url"));
+    formData.putSingle("username", "real@example.com");
+    when(users.getUserByEmail(realm, "real@example.com")).thenReturn(null);
+    when(users.getUserByUsername(realm, "real@example.com")).thenReturn(null);
+    when(users.addUser(realm, "real@example.com")).thenReturn(mock(UserModel.class));
+
+    auth.action(ctx);
+
+    verify(users).addUser(realm, "real@example.com");
+    verify(ctx).success();
+  }
+
+  @Test
+  void action_rejectsWhenCaptchaTokenMissing_noCreate() {
+    withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET, "secret"));
+    formData.putSingle("username", "real@example.com"); // no captcha token field
+
+    auth.action(ctx);
+
+    verify(ctx).challenge(any());
+    verify(ctx, never()).success();
+    verify(users, never()).addUser(any(), anyString());
+  }
+
+  @Test
+  void action_rejectsWhenCaptchaInvalid_noCreate() {
+    auth = stubbedCaptcha(false);
+    withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET, "secret"));
+    formData.putSingle("username", "real@example.com");
+    formData.putSingle("cf-turnstile-response", "tok");
+
+    auth.action(ctx);
+
+    verify(ctx).challenge(any());
+    verify(ctx, never()).success();
+    verify(users, never()).addUser(any(), anyString());
+  }
+
+  @Test
+  void action_proceedsWhenCaptchaValid() {
+    auth = stubbedCaptcha(true);
+    withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET, "secret"));
+    formData.putSingle("username", "real@example.com");
+    formData.putSingle("cf-turnstile-response", "tok");
+    when(users.getUserByEmail(realm, "real@example.com")).thenReturn(null);
+    when(users.getUserByUsername(realm, "real@example.com")).thenReturn(null);
+    when(users.addUser(realm, "real@example.com")).thenReturn(mock(UserModel.class));
+
+    auth.action(ctx);
+
+    verify(users).addUser(realm, "real@example.com");
+    verify(ctx).success();
+  }
+
+  @Test
   void requiresUser_isFalse() {
     org.junit.jupiter.api.Assertions.assertFalse(auth.requiresUser());
+  }
+
+  private void withConfig(Map<String, String> config) {
+    AuthenticatorConfigModel model = mock(AuthenticatorConfigModel.class);
+    when(model.getConfig()).thenReturn(config);
+    when(ctx.getAuthenticatorConfig()).thenReturn(model);
+  }
+
+  // Subclass that stubs the network verification so tests stay offline.
+  private static EmailLookupOrCreateAuthenticator stubbedCaptcha(boolean result) {
+    return new EmailLookupOrCreateAuthenticator() {
+      @Override
+      boolean verifyCaptcha(
+          AuthenticationFlowContext context, String secret, String verifyUrl, String token) {
+        return result;
+      }
+    };
   }
 }
