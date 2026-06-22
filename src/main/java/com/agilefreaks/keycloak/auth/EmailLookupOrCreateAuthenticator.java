@@ -10,6 +10,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import org.jboss.logging.Logger;
 import org.keycloak.authentication.AuthenticationFlowContext;
@@ -19,6 +20,7 @@ import org.keycloak.models.AuthenticatorConfigModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.utils.FormMessage;
 import org.keycloak.services.messages.Messages;
 import org.keycloak.services.validation.Validation;
 import org.keycloak.util.JsonSerialization;
@@ -29,11 +31,6 @@ import org.keycloak.util.JsonSerialization;
  * following step can verify ownership (e.g. an email/SMS one-time code or a
  * magic link). The optional {@code set-email-verified} authenticator can mark
  * the email verified once that step succeeds.
- *
- * <p>Two optional abuse checks run before any user is created or downstream
- * step fires, both off unless configured (see the factory's config properties):
- * a honeypot field (reject submissions that filled a field humans never see)
- * and a CAPTCHA token verified server-side (Cloudflare Turnstile / reCAPTCHA).
  */
 public class EmailLookupOrCreateAuthenticator implements Authenticator {
 
@@ -67,8 +64,6 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
   public void action(AuthenticationFlowContext context) {
     MultivaluedMap<String, String> formData = context.getHttpRequest().getDecodedFormParameters();
 
-    // Honeypot: a hidden field humans never see. If it carries a value, a bot
-    // filled it — re-render without creating a user or triggering the next step.
     String honeypotField = config(context, CONFIG_HONEYPOT_FIELD);
     if (honeypotField != null) {
       String trap = formData.getFirst(honeypotField);
@@ -86,7 +81,6 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
     }
     email = email.trim().toLowerCase();
 
-    // CAPTCHA: verify the token server-side before any user is created.
     String secret = config(context, CONFIG_CAPTCHA_SECRET);
     if (secret != null) {
       String responseField =
@@ -129,8 +123,6 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
    * true on a confirmed pass. Fails <em>open</em> on a network/parse error so a
    * provider outage cannot block every login — abuse during such a window is
    * still bounded by the honeypot and the downstream OTP send cooldown.
-   *
-   * <p>Package-protected and non-final so tests can stub it without a network call.
    */
   boolean verifyCaptcha(
       AuthenticationFlowContext context, String secret, String verifyUrl, String token) {
@@ -165,7 +157,7 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
       form.setAttribute("captchaSiteKey", siteKey);
     }
     if (error != null) {
-      form.setError(error);
+      form.setErrors(List.of(new FormMessage(FIELD, error)));
     }
     return form.createLoginUsername();
   }
