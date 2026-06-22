@@ -57,6 +57,7 @@ class EmailLookupOrCreateAuthenticatorTest {
     when(ctx.getAuthenticationSession()).thenReturn(authSession);
     when(ctx.form()).thenReturn(form);
     when(form.setError(anyString())).thenReturn(form);
+    when(form.setErrors(any())).thenReturn(form);
     when(form.createLoginUsername()).thenReturn(mock(Response.class));
   }
 
@@ -134,7 +135,7 @@ class EmailLookupOrCreateAuthenticatorTest {
 
     auth.action(ctx);
 
-    verify(form).setError(anyString());
+    verify(form).setErrors(any());
     verify(ctx).challenge(any());
     verify(ctx, never()).success();
     verify(users, never()).addUser(any(), anyString());
@@ -153,7 +154,7 @@ class EmailLookupOrCreateAuthenticatorTest {
   void action_rejectsWhenHoneypotFilled_noCreate() {
     withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, "company_url"));
     formData.putSingle("username", "real@example.com");
-    formData.putSingle("company_url", "http://spam.example"); // bot filled the trap
+    formData.putSingle("company_url", "http://spam.example");
 
     auth.action(ctx);
 
@@ -179,7 +180,7 @@ class EmailLookupOrCreateAuthenticatorTest {
   @Test
   void action_rejectsWhenCaptchaTokenMissing_noCreate() {
     withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET, "secret"));
-    formData.putSingle("username", "real@example.com"); // no captcha token field
+    formData.putSingle("username", "real@example.com");
 
     auth.action(ctx);
 
@@ -219,6 +220,78 @@ class EmailLookupOrCreateAuthenticatorTest {
   }
 
   @Test
+  void action_honeypotDisabledWhenFieldNameBlank() {
+    withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, ""));
+    formData.putSingle("username", "real@example.com");
+    when(users.getUserByEmail(realm, "real@example.com")).thenReturn(null);
+    when(users.getUserByUsername(realm, "real@example.com")).thenReturn(null);
+    when(users.addUser(realm, "real@example.com")).thenReturn(mock(UserModel.class));
+
+    auth.action(ctx);
+
+    verify(ctx).success();
+  }
+
+  @Test
+  void action_captchaDisabledWhenSecretBlank() {
+    withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET, ""));
+    formData.putSingle("username", "real@example.com");
+    when(users.getUserByEmail(realm, "real@example.com")).thenReturn(null);
+    when(users.getUserByUsername(realm, "real@example.com")).thenReturn(null);
+    when(users.addUser(realm, "real@example.com")).thenReturn(mock(UserModel.class));
+
+    auth.action(ctx);
+
+    verify(ctx).success();
+  }
+
+  @Test
+  void action_allChecksDisabledWhenAllBlank() {
+    withConfig(
+        Map.of(
+            EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, "",
+            EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SITE_KEY, "",
+            EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET, ""));
+    formData.putSingle("username", "real@example.com");
+    when(users.getUserByEmail(realm, "real@example.com")).thenReturn(null);
+    when(users.getUserByUsername(realm, "real@example.com")).thenReturn(null);
+    when(users.addUser(realm, "real@example.com")).thenReturn(mock(UserModel.class));
+
+    auth.action(ctx);
+
+    verify(users).addUser(realm, "real@example.com");
+    verify(ctx).success();
+  }
+
+  @Test
+  void authenticate_setsFormAttributesWhenConfigured() {
+    when(ctx.getUser()).thenReturn(null);
+    withConfig(
+        Map.of(
+            EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, "website",
+            EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SITE_KEY, "sitekey-123"));
+
+    auth.authenticate(ctx);
+
+    verify(form).setAttribute("honeypotField", "website");
+    verify(form).setAttribute("captchaSiteKey", "sitekey-123");
+  }
+
+  @Test
+  void authenticate_skipsFormAttributesWhenBlank() {
+    when(ctx.getUser()).thenReturn(null);
+    withConfig(
+        Map.of(
+            EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, "",
+            EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SITE_KEY, ""));
+
+    auth.authenticate(ctx);
+
+    verify(form, never()).setAttribute(eq("honeypotField"), any());
+    verify(form, never()).setAttribute(eq("captchaSiteKey"), any());
+  }
+
+  @Test
   void requiresUser_isFalse() {
     org.junit.jupiter.api.Assertions.assertFalse(auth.requiresUser());
   }
@@ -229,7 +302,6 @@ class EmailLookupOrCreateAuthenticatorTest {
     when(ctx.getAuthenticatorConfig()).thenReturn(model);
   }
 
-  // Subclass that stubs the network verification so tests stay offline.
   private static EmailLookupOrCreateAuthenticator stubbedCaptcha(boolean result) {
     return new EmailLookupOrCreateAuthenticator() {
       @Override
