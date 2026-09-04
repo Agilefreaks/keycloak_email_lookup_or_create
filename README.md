@@ -14,7 +14,7 @@ Built and tested against **Keycloak 26.5** (`keycloak.version` in `pom.xml`).
 
 | Provider id | `requiresUser()` | What it does |
 |---|---|---|
-| `email-lookup-or-create` | `false` | Renders the email form, looks the user up by email (falls back to username), and **creates one if none exists** (username = email, unverified), then sets it on the flow. |
+| `email-lookup-or-create` | `false` | Looks the user up by email (falls back to username) and **creates one if none exists** (username = email, unverified), then sets it on the flow. Renders the email form in a browser flow; in a direct grant flow it reads the address straight from the request. |
 | `set-email-verified` | `true` | Sets the authenticated user's `emailVerified = true`. Optional; place it **after** your verification step, so reaching it is the proof of ownership. No-op if already verified or no user. |
 
 ## Why
@@ -25,6 +25,29 @@ want the opposite: a single form where existing and new users are
 indistinguishable — enter email → prove ownership → you're in. This library
 supplies the missing "find-or-create the user" step so you can assemble that flow
 from a verification authenticator of your choice.
+
+## Browser and direct grant, one authenticator
+
+The same provider works in both, so a native app gets the same login as the web without a second
+implementation to keep in step. It recognises a direct grant by `getFlowPath()`, which the
+resource-owner password grant sets to `token`; anything else is treated as a form flow, so an
+unexpected value renders a page rather than leaking one into a token response.
+
+| | Browser flow | Direct grant |
+|---|---|---|
+| Address arrives | posted from the rendered form | `username` (or `email`) form parameter of the token request |
+| Errors | field-scoped message, form re-rendered | OAuth JSON — `{"error": "invalid_request" \| "invalid_grant", "error_description": …}` |
+| Honeypot / CAPTCHA | enforced | not applicable; a native client cannot produce either |
+| Disabled and brute-force-locked users | left to Keycloak's own handling later in the flow | rejected here, as Keycloak's built-in direct grant authenticators do |
+
+Beyond that the two are identical: same normalization, same find-or-create, same
+`ATTEMPTED_USERNAME` note. A direct grant flow pairs it the same way:
+
+```
+email-lookup-or-create   (REQUIRED)   ← username=<email> on the token request
+<your ownership check reading its own form parameter>   (REQUIRED)
+set-email-verified       (REQUIRED)
+```
 
 ## Example flow
 

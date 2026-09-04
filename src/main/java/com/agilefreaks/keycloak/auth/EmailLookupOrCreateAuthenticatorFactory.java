@@ -53,7 +53,9 @@ public class EmailLookupOrCreateAuthenticatorFactory implements AuthenticatorFac
   @Override
   public String getHelpText() {
     return "Collects an email, finds the user or creates a new one, and sets it on the flow "
-        + "(passwordless login-or-signup). Pair it before a step that verifies email ownership.";
+        + "(passwordless login-or-signup). Renders the email form in a browser flow, and reads the "
+        + "'username' form parameter in a direct grant flow. Pair it before a step that verifies "
+        + "email ownership.";
   }
 
   @Override

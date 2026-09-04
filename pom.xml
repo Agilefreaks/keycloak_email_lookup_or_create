@@ -52,6 +52,14 @@
     </dependency>
 
     <!-- Tests -->
+    <!-- Supplies the JAX-RS RuntimeDelegate that Response.status() needs when building the
+         direct grant error bodies; at runtime Keycloak's own RESTEasy provides it. -->
+    <dependency>
+      <groupId>org.jboss.resteasy</groupId>
+      <artifactId>resteasy-core</artifactId>
+      <version>6.2.12.Final</version>
+      <scope>test</scope>
+    </dependency>
     <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
