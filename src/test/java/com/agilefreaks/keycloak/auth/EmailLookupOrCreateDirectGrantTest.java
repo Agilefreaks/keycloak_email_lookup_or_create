@@ -31,11 +31,7 @@ import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.util.JsonSerialization;
 import org.mockito.ArgumentCaptor;
 
-/**
- * The same authenticator in a direct grant flow, where the address arrives as a form parameter of
- * the token request. It recognises that flow by {@code getFlowPath() == "token"}; the browser tests
- * leave it unset, which is why they exercise the form path unchanged.
- */
+/** The same authenticator in a direct grant flow ({@code getFlowPath() == "token"}). */
 class EmailLookupOrCreateDirectGrantTest {
 
   private static final String EMAIL = "visitor@example.com";
@@ -119,7 +115,6 @@ class EmailLookupOrCreateDirectGrantTest {
 
     auth.authenticate(ctx);
 
-    // context.form() would blow up on a token request; the guard is that we never reach it.
     verify(ctx, never()).form();
     verify(ctx, never()).challenge(any());
   }
@@ -174,8 +169,7 @@ class EmailLookupOrCreateDirectGrantTest {
 
     auth.authenticate(ctx);
 
-    // A direct grant rejects any user with a pending required action ("Account is not fully set
-    // up"), so adding one here would break token login for every new account.
+    // Direct grant rejects a user with a pending required action.
     verify(created, never()).addRequiredAction(anyString());
     verify(created, never()).addRequiredAction(any(UserModel.RequiredAction.class));
   }
@@ -232,8 +226,7 @@ class EmailLookupOrCreateDirectGrantTest {
 
     auth.authenticate(ctx);
 
-    // Two requests for the same new address — a double-tapped submit, or a retried token
-    // request — must not surface as a 500 to whichever one loses.
+    // Regression: the loser used to get an HTTP 500.
     verify(ctx).setUser(winner);
     verify(ctx).success();
   }
@@ -261,7 +254,6 @@ class EmailLookupOrCreateDirectGrantTest {
 
     auth.authenticate(ctx);
 
-    // Without an address the next step has nothing to verify against and the login dead-ends.
     verify(byUsername).setEmail(EMAIL);
     verify(ctx).success();
   }
@@ -275,8 +267,6 @@ class EmailLookupOrCreateDirectGrantTest {
 
     auth.authenticate(ctx);
 
-    // Without this the LOGIN_ERROR event carries no reason, so a lockout and a bad address look
-    // identical in the event log.
     verify(event).error(Errors.USER_DISABLED);
   }
 
@@ -288,7 +278,6 @@ class EmailLookupOrCreateDirectGrantTest {
 
     auth.authenticate(ctx);
 
-    // A Turkish default locale would lowercase I to a dotless i and miss this user.
     verify(ctx).setUser(existing);
     verify(ctx).success();
   }
