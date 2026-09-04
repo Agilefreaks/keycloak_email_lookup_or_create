@@ -7,9 +7,8 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 
 /**
- * Marks the authenticated user's email as verified. Intended as the final step
- * of a passwordless flow: it runs only after the preceding step has verified
- * ownership of the email, so reaching it is the proof.
+ * Marks the authenticated user's email as verified. Place it after the step that proves ownership
+ * of the address, so reaching it is the proof.
  */
 public class SetEmailVerifiedAuthenticator implements Authenticator {
 
@@ -23,9 +22,7 @@ public class SetEmailVerifiedAuthenticator implements Authenticator {
   }
 
   @Override
-  public void action(AuthenticationFlowContext context) {
-    // no form interaction
-  }
+  public void action(AuthenticationFlowContext context) {}
 
   @Override
   public boolean requiresUser() {
@@ -38,12 +35,8 @@ public class SetEmailVerifiedAuthenticator implements Authenticator {
   }
 
   @Override
-  public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {
-    // no-op
-  }
+  public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {}
 
   @Override
-  public void close() {
-    // no-op
-  }
+  public void close() {}
 }

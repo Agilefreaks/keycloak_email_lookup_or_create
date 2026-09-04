@@ -1,5 +1,6 @@
 package com.agilefreaks.keycloak.auth;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -27,13 +28,13 @@ import org.keycloak.sessions.AuthenticationSessionModel;
 
 class EmailLookupOrCreateAuthenticatorTest {
 
+  private static final String EMAIL = "real@example.com";
+
   private EmailLookupOrCreateAuthenticator auth;
   private AuthenticationFlowContext ctx;
-  private KeycloakSession session;
   private UserProvider users;
   private RealmModel realm;
   private LoginFormsProvider form;
-  private HttpRequest httpRequest;
   private AuthenticationSessionModel authSession;
   private MultivaluedMap<String, String> formData;
 
@@ -41,11 +42,11 @@ class EmailLookupOrCreateAuthenticatorTest {
   void setup() {
     auth = new EmailLookupOrCreateAuthenticator();
     ctx = mock(AuthenticationFlowContext.class);
-    session = mock(KeycloakSession.class);
+    KeycloakSession session = mock(KeycloakSession.class);
     users = mock(UserProvider.class);
     realm = mock(RealmModel.class);
     form = mock(LoginFormsProvider.class);
-    httpRequest = mock(HttpRequest.class);
+    HttpRequest httpRequest = mock(HttpRequest.class);
     authSession = mock(AuthenticationSessionModel.class);
     formData = new MultivaluedHashMap<>();
 
@@ -56,15 +57,11 @@ class EmailLookupOrCreateAuthenticatorTest {
     when(httpRequest.getDecodedFormParameters()).thenReturn(formData);
     when(ctx.getAuthenticationSession()).thenReturn(authSession);
     when(ctx.form()).thenReturn(form);
-    when(form.setError(anyString())).thenReturn(form);
-    when(form.setErrors(any())).thenReturn(form);
     when(form.createLoginUsername()).thenReturn(mock(Response.class));
   }
 
   @Test
   void authenticate_challengesWhenNoUser() {
-    when(ctx.getUser()).thenReturn(null);
-
     auth.authenticate(ctx);
 
     verify(form).createLoginUsername();
@@ -85,28 +82,23 @@ class EmailLookupOrCreateAuthenticatorTest {
   @Test
   void action_createsUserWhenUnknown_andNormalizesEmail() {
     formData.putSingle("username", "  New@Example.com  ");
-    when(users.getUserByEmail(realm, "new@example.com")).thenReturn(null);
-    when(users.getUserByUsername(realm, "new@example.com")).thenReturn(null);
-    UserModel created = mock(UserModel.class);
-    when(users.addUser(realm, "new@example.com")).thenReturn(created);
+    UserModel created = unknownAddress("new@example.com");
 
     auth.action(ctx);
 
-    verify(users).addUser(realm, "new@example.com");
     verify(created).setEnabled(true);
     verify(created).setEmail("new@example.com");
     verify(ctx).setUser(created);
     verify(ctx).success();
     verify(authSession)
-        .setAuthNote(
-            eq(AbstractUsernameFormAuthenticator.ATTEMPTED_USERNAME), eq("new@example.com"));
+        .setAuthNote(AbstractUsernameFormAuthenticator.ATTEMPTED_USERNAME, "new@example.com");
   }
 
   @Test
   void action_usesExistingUser_noCreate() {
-    formData.putSingle("username", "existing@example.com");
+    formData.putSingle("username", EMAIL);
     UserModel existing = mock(UserModel.class);
-    when(users.getUserByEmail(realm, "existing@example.com")).thenReturn(existing);
+    when(users.getUserByEmail(realm, EMAIL)).thenReturn(existing);
 
     auth.action(ctx);
 
@@ -117,10 +109,9 @@ class EmailLookupOrCreateAuthenticatorTest {
 
   @Test
   void action_fallsBackToUsernameLookup() {
-    formData.putSingle("username", "byusername@example.com");
-    when(users.getUserByEmail(realm, "byusername@example.com")).thenReturn(null);
+    formData.putSingle("username", EMAIL);
     UserModel byUsername = mock(UserModel.class);
-    when(users.getUserByUsername(realm, "byusername@example.com")).thenReturn(byUsername);
+    when(users.getUserByUsername(realm, EMAIL)).thenReturn(byUsername);
 
     auth.action(ctx);
 
@@ -136,136 +127,93 @@ class EmailLookupOrCreateAuthenticatorTest {
     auth.action(ctx);
 
     verify(form).setErrors(any());
-    verify(ctx).challenge(any());
-    verify(ctx, never()).success();
-    verify(users, never()).addUser(any(), anyString());
+    verifyRejected();
   }
 
   @Test
   void action_rejectsMissingEmail() {
-    auth.action(ctx); // no "username" in formData
+    auth.action(ctx);
 
-    verify(ctx).challenge(any());
-    verify(ctx, never()).success();
-    verify(users, never()).addUser(any(), anyString());
+    verifyRejected();
   }
 
   @Test
   void action_rejectsWhenHoneypotFilled_noCreate() {
     withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, "company_url"));
-    formData.putSingle("username", "real@example.com");
+    formData.putSingle("username", EMAIL);
     formData.putSingle("company_url", "http://spam.example");
 
     auth.action(ctx);
 
-    verify(ctx).challenge(any());
-    verify(ctx, never()).success();
-    verify(users, never()).addUser(any(), anyString());
+    verifyRejected();
   }
 
   @Test
   void action_proceedsWhenHoneypotEmpty() {
     withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, "company_url"));
-    formData.putSingle("username", "real@example.com");
-    when(users.getUserByEmail(realm, "real@example.com")).thenReturn(null);
-    when(users.getUserByUsername(realm, "real@example.com")).thenReturn(null);
-    when(users.addUser(realm, "real@example.com")).thenReturn(mock(UserModel.class));
+    formData.putSingle("username", EMAIL);
+    UserModel created = unknownAddress(EMAIL);
 
     auth.action(ctx);
 
-    verify(users).addUser(realm, "real@example.com");
+    verify(ctx).setUser(created);
     verify(ctx).success();
   }
 
   @Test
   void action_rejectsWhenCaptchaTokenMissing_noCreate() {
     withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET, "secret"));
-    formData.putSingle("username", "real@example.com");
+    formData.putSingle("username", EMAIL);
 
     auth.action(ctx);
 
-    verify(ctx).challenge(any());
-    verify(ctx, never()).success();
-    verify(users, never()).addUser(any(), anyString());
+    verifyRejected();
   }
 
   @Test
   void action_rejectsWhenCaptchaInvalid_noCreate() {
     auth = stubbedCaptcha(false);
     withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET, "secret"));
-    formData.putSingle("username", "real@example.com");
+    formData.putSingle("username", EMAIL);
     formData.putSingle("cf-turnstile-response", "tok");
 
     auth.action(ctx);
 
-    verify(ctx).challenge(any());
-    verify(ctx, never()).success();
-    verify(users, never()).addUser(any(), anyString());
+    verifyRejected();
   }
 
   @Test
   void action_proceedsWhenCaptchaValid() {
     auth = stubbedCaptcha(true);
     withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET, "secret"));
-    formData.putSingle("username", "real@example.com");
+    formData.putSingle("username", EMAIL);
     formData.putSingle("cf-turnstile-response", "tok");
-    when(users.getUserByEmail(realm, "real@example.com")).thenReturn(null);
-    when(users.getUserByUsername(realm, "real@example.com")).thenReturn(null);
-    when(users.addUser(realm, "real@example.com")).thenReturn(mock(UserModel.class));
+    UserModel created = unknownAddress(EMAIL);
 
     auth.action(ctx);
 
-    verify(users).addUser(realm, "real@example.com");
+    verify(ctx).setUser(created);
     verify(ctx).success();
   }
 
   @Test
-  void action_honeypotDisabledWhenFieldNameBlank() {
-    withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, ""));
-    formData.putSingle("username", "real@example.com");
-    when(users.getUserByEmail(realm, "real@example.com")).thenReturn(null);
-    when(users.getUserByUsername(realm, "real@example.com")).thenReturn(null);
-    when(users.addUser(realm, "real@example.com")).thenReturn(mock(UserModel.class));
-
-    auth.action(ctx);
-
-    verify(ctx).success();
-  }
-
-  @Test
-  void action_captchaDisabledWhenSecretBlank() {
-    withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET, ""));
-    formData.putSingle("username", "real@example.com");
-    when(users.getUserByEmail(realm, "real@example.com")).thenReturn(null);
-    when(users.getUserByUsername(realm, "real@example.com")).thenReturn(null);
-    when(users.addUser(realm, "real@example.com")).thenReturn(mock(UserModel.class));
-
-    auth.action(ctx);
-
-    verify(ctx).success();
-  }
-
-  @Test
-  void action_allChecksDisabledWhenAllBlank() {
+  void action_blankConfigDisablesEveryCheck() {
     withConfig(
         Map.of(
             EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, "",
             EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SITE_KEY, "",
             EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET, ""));
-    formData.putSingle("username", "real@example.com");
-    when(users.getUserByEmail(realm, "real@example.com")).thenReturn(null);
-    when(users.getUserByUsername(realm, "real@example.com")).thenReturn(null);
-    when(users.addUser(realm, "real@example.com")).thenReturn(mock(UserModel.class));
+    formData.putSingle("username", EMAIL);
+    UserModel created = unknownAddress(EMAIL);
 
     auth.action(ctx);
 
-    verify(users).addUser(realm, "real@example.com");
+    verify(ctx).setUser(created);
     verify(ctx).success();
   }
 
   @Test
   void authenticate_setsFormAttributesWhenConfigured() {
-    when(ctx.getUser()).thenReturn(null);
     withConfig(
         Map.of(
             EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, "website",
@@ -279,7 +227,6 @@ class EmailLookupOrCreateAuthenticatorTest {
 
   @Test
   void authenticate_skipsFormAttributesWhenBlank() {
-    when(ctx.getUser()).thenReturn(null);
     withConfig(
         Map.of(
             EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, "",
@@ -293,7 +240,20 @@ class EmailLookupOrCreateAuthenticatorTest {
 
   @Test
   void requiresUser_isFalse() {
-    org.junit.jupiter.api.Assertions.assertFalse(auth.requiresUser());
+    assertFalse(auth.requiresUser());
+  }
+
+  /** No user has this address; creating one returns the given mock. */
+  private UserModel unknownAddress(String email) {
+    UserModel created = mock(UserModel.class);
+    when(users.addUser(realm, email)).thenReturn(created);
+    return created;
+  }
+
+  private void verifyRejected() {
+    verify(ctx).challenge(any());
+    verify(ctx, never()).success();
+    verify(users, never()).addUser(any(), anyString());
   }
 
   private void withConfig(Map<String, String> config) {

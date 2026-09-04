@@ -9,10 +9,10 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
-import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.keycloak.authentication.AuthenticationFlowContext;
@@ -22,13 +22,13 @@ import org.keycloak.events.Errors;
 import org.keycloak.events.EventBuilder;
 import org.keycloak.http.HttpRequest;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.ModelDuplicateException;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
-import org.keycloak.models.ModelDuplicateException;
 import org.keycloak.models.UserProvider;
+import org.keycloak.representations.idm.OAuth2ErrorRepresentation;
 import org.keycloak.services.managers.BruteForceProtector;
 import org.keycloak.sessions.AuthenticationSessionModel;
-import org.keycloak.util.JsonSerialization;
 import org.mockito.ArgumentCaptor;
 
 /** The same authenticator in a direct grant flow ({@code getFlowPath() == "token"}). */
@@ -36,7 +36,7 @@ class EmailLookupOrCreateDirectGrantTest {
 
   private static final String EMAIL = "visitor@example.com";
 
-  private EmailLookupOrCreateAuthenticator auth;
+  private final EmailLookupOrCreateAuthenticator auth = new EmailLookupOrCreateAuthenticator();
   private AuthenticationFlowContext ctx;
   private KeycloakSession session;
   private UserProvider users;
@@ -47,7 +47,6 @@ class EmailLookupOrCreateDirectGrantTest {
 
   @BeforeEach
   void setup() {
-    auth = new EmailLookupOrCreateAuthenticator();
     ctx = mock(AuthenticationFlowContext.class);
     session = mock(KeycloakSession.class);
     users = mock(UserProvider.class);
@@ -67,9 +66,10 @@ class EmailLookupOrCreateDirectGrantTest {
     when(httpRequest.getDecodedFormParameters()).thenReturn(formData);
   }
 
-  private static UserModel enabledUser() {
+  private UserModel existingUser(boolean enabled) {
     UserModel user = mock(UserModel.class);
-    when(user.isEnabled()).thenReturn(true);
+    when(user.isEnabled()).thenReturn(enabled);
+    when(users.getUserByEmail(realm, EMAIL)).thenReturn(user);
     return user;
   }
 
@@ -79,13 +79,8 @@ class EmailLookupOrCreateDirectGrantTest {
     return captor.getValue();
   }
 
-  @SuppressWarnings("unchecked")
-  private static Map<String, Object> body(Response response) {
-    try {
-      return JsonSerialization.readValue(String.valueOf(response.getEntity()), Map.class);
-    } catch (Exception e) {
-      throw new AssertionError("response entity is not JSON: " + response.getEntity(), e);
-    }
+  private static OAuth2ErrorRepresentation body(Response response) {
+    return (OAuth2ErrorRepresentation) response.getEntity();
   }
 
   @Test
@@ -94,7 +89,8 @@ class EmailLookupOrCreateDirectGrantTest {
 
     Response response = captureFailure(AuthenticationFlowError.INVALID_USER);
     assertEquals(400, response.getStatus());
-    assertEquals("invalid_request", body(response).get("error"));
+    assertEquals(MediaType.APPLICATION_JSON_TYPE, response.getMediaType());
+    assertEquals("invalid_request", body(response).getError());
     verify(users, never()).addUser(any(), anyString());
     verify(ctx, never()).success();
   }
@@ -121,8 +117,7 @@ class EmailLookupOrCreateDirectGrantTest {
 
   @Test
   void findsAnExistingUserAndNormalisesTheAddress() {
-    UserModel existing = enabledUser();
-    when(users.getUserByEmail(realm, EMAIL)).thenReturn(existing);
+    UserModel existing = existingUser(true);
     formData.putSingle("username", "  Visitor@Example.COM ");
 
     auth.authenticate(ctx);
@@ -134,8 +129,7 @@ class EmailLookupOrCreateDirectGrantTest {
 
   @Test
   void acceptsTheEmailParameterAsAFallback() {
-    UserModel existing = enabledUser();
-    when(users.getUserByEmail(realm, EMAIL)).thenReturn(existing);
+    UserModel existing = existingUser(true);
     formData.putSingle("email", EMAIL);
 
     auth.authenticate(ctx);
@@ -146,9 +140,8 @@ class EmailLookupOrCreateDirectGrantTest {
 
   @Test
   void createsAnEnabledUserForAnUnknownAddress() {
-    UserModel created = enabledUser();
-    when(users.getUserByEmail(realm, EMAIL)).thenReturn(null);
-    when(users.getUserByUsername(realm, EMAIL)).thenReturn(null);
+    UserModel created = mock(UserModel.class);
+    when(created.isEnabled()).thenReturn(true);
     when(users.addUser(realm, EMAIL)).thenReturn(created);
     formData.putSingle("username", EMAIL);
 
@@ -158,17 +151,6 @@ class EmailLookupOrCreateDirectGrantTest {
     verify(created).setEnabled(true);
     verify(ctx).setUser(created);
     verify(ctx).success();
-  }
-
-  @Test
-  void createdUserCarriesNoRequiredAction() {
-    UserModel created = enabledUser();
-    when(users.getUserByEmail(realm, EMAIL)).thenReturn(null);
-    when(users.addUser(realm, EMAIL)).thenReturn(created);
-    formData.putSingle("username", EMAIL);
-
-    auth.authenticate(ctx);
-
     // Direct grant rejects a user with a pending required action.
     verify(created, never()).addRequiredAction(anyString());
     verify(created, never()).addRequiredAction(any(UserModel.RequiredAction.class));
@@ -176,35 +158,31 @@ class EmailLookupOrCreateDirectGrantTest {
 
   @Test
   void recordsTheAttemptedUsername() {
-    UserModel existing = enabledUser();
-    when(users.getUserByEmail(realm, EMAIL)).thenReturn(existing);
+    existingUser(true);
     formData.putSingle("username", EMAIL);
 
     auth.authenticate(ctx);
 
-    verify(authSession)
-        .setAuthNote(AbstractUsernameFormAuthenticator.ATTEMPTED_USERNAME, EMAIL);
+    verify(authSession).setAuthNote(AbstractUsernameFormAuthenticator.ATTEMPTED_USERNAME, EMAIL);
   }
 
   @Test
   void refusesADisabledUser() {
-    UserModel disabled = mock(UserModel.class);
-    when(disabled.isEnabled()).thenReturn(false);
-    when(users.getUserByEmail(realm, EMAIL)).thenReturn(disabled);
+    existingUser(false);
     formData.putSingle("username", EMAIL);
 
     auth.authenticate(ctx);
 
     Response response = captureFailure(AuthenticationFlowError.USER_DISABLED);
-    assertEquals("invalid_grant", body(response).get("error"));
+    assertEquals("invalid_grant", body(response).getError());
+    verify(event).error(Errors.USER_DISABLED);
     verify(ctx, never()).success();
   }
 
   @Test
   void refusesAUserLockedOutByBruteForceProtection() {
-    UserModel existing = enabledUser();
+    UserModel existing = existingUser(true);
     BruteForceProtector protector = mock(BruteForceProtector.class);
-    when(users.getUserByEmail(realm, EMAIL)).thenReturn(existing);
     when(realm.isBruteForceProtected()).thenReturn(true);
     when(ctx.getProtector()).thenReturn(protector);
     when(protector.isTemporarilyDisabled(session, realm, existing)).thenReturn(true);
@@ -213,13 +191,14 @@ class EmailLookupOrCreateDirectGrantTest {
     auth.authenticate(ctx);
 
     Response response = captureFailure(AuthenticationFlowError.USER_TEMPORARILY_DISABLED);
-    assertEquals("invalid_grant", body(response).get("error"));
+    assertEquals("invalid_grant", body(response).getError());
     verify(ctx, never()).success();
   }
 
   @Test
   void aLostRaceCreatingTheUserUsesTheOneThatWon() {
-    UserModel winner = enabledUser();
+    UserModel winner = mock(UserModel.class);
+    when(winner.isEnabled()).thenReturn(true);
     when(users.getUserByEmail(realm, EMAIL)).thenReturn(null).thenReturn(winner);
     when(users.addUser(realm, EMAIL)).thenThrow(new ModelDuplicateException("username exists"));
     formData.putSingle("username", EMAIL);
@@ -246,9 +225,8 @@ class EmailLookupOrCreateDirectGrantTest {
 
   @Test
   void fillsInAMissingEmailWhenMatchingOnUsername() {
-    UserModel byUsername = enabledUser();
-    when(byUsername.getEmail()).thenReturn(null);
-    when(users.getUserByEmail(realm, EMAIL)).thenReturn(null);
+    UserModel byUsername = mock(UserModel.class);
+    when(byUsername.isEnabled()).thenReturn(true);
     when(users.getUserByUsername(realm, EMAIL)).thenReturn(byUsername);
     formData.putSingle("username", EMAIL);
 
@@ -259,20 +237,9 @@ class EmailLookupOrCreateDirectGrantTest {
   }
 
   @Test
-  void reportsAnEventErrorBeforeEachRefusal() {
-    UserModel disabled = mock(UserModel.class);
-    when(disabled.isEnabled()).thenReturn(false);
-    when(users.getUserByEmail(realm, EMAIL)).thenReturn(disabled);
-    formData.putSingle("username", EMAIL);
-
-    auth.authenticate(ctx);
-
-    verify(event).error(Errors.USER_DISABLED);
-  }
-
-  @Test
   void normalisesTheAddressIndependentlyOfTheDefaultLocale() {
-    UserModel existing = enabledUser();
+    UserModel existing = mock(UserModel.class);
+    when(existing.isEnabled()).thenReturn(true);
     when(users.getUserByEmail(realm, "ivan@example.com")).thenReturn(existing);
     formData.putSingle("username", "IVAN@EXAMPLE.COM");
 
@@ -284,8 +251,7 @@ class EmailLookupOrCreateDirectGrantTest {
 
   @Test
   void anUpstreamStepThatAlreadyIdentifiedTheUserShortCircuits() {
-    UserModel alreadyKnown = enabledUser();
-    when(ctx.getUser()).thenReturn(alreadyKnown);
+    when(ctx.getUser()).thenReturn(mock(UserModel.class));
 
     auth.authenticate(ctx);
 

@@ -1,5 +1,6 @@
 package com.agilefreaks.keycloak.auth;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -13,13 +14,12 @@ import org.keycloak.models.UserModel;
 class SetEmailVerifiedAuthenticatorTest {
 
   private final SetEmailVerifiedAuthenticator auth = new SetEmailVerifiedAuthenticator();
+  private final AuthenticationFlowContext ctx = mock(AuthenticationFlowContext.class);
+  private final UserModel user = mock(UserModel.class);
 
   @Test
   void verifiesWhenNotYetVerified() {
-    AuthenticationFlowContext ctx = mock(AuthenticationFlowContext.class);
-    UserModel user = mock(UserModel.class);
     when(ctx.getUser()).thenReturn(user);
-    when(user.isEmailVerified()).thenReturn(false);
 
     auth.authenticate(ctx);
 
@@ -29,8 +29,6 @@ class SetEmailVerifiedAuthenticatorTest {
 
   @Test
   void skipsWhenAlreadyVerified() {
-    AuthenticationFlowContext ctx = mock(AuthenticationFlowContext.class);
-    UserModel user = mock(UserModel.class);
     when(ctx.getUser()).thenReturn(user);
     when(user.isEmailVerified()).thenReturn(true);
 
@@ -42,9 +40,6 @@ class SetEmailVerifiedAuthenticatorTest {
 
   @Test
   void succeedsWithoutUser() {
-    AuthenticationFlowContext ctx = mock(AuthenticationFlowContext.class);
-    when(ctx.getUser()).thenReturn(null);
-
     auth.authenticate(ctx);
 
     verify(ctx).success();
@@ -52,6 +47,6 @@ class SetEmailVerifiedAuthenticatorTest {
 
   @Test
   void requiresUser_isTrue() {
-    org.junit.jupiter.api.Assertions.assertTrue(auth.requiresUser());
+    assertTrue(auth.requiresUser());
   }
 }

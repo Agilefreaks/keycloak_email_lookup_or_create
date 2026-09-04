@@ -52,7 +52,8 @@ public class SetEmailVerifiedAuthenticatorFactory implements AuthenticatorFactor
 
   @Override
   public String getHelpText() {
-    return "Marks the authenticated user's email as verified. Place after the step that verifies ownership.";
+    return "Marks the authenticated user's email as verified. Place after the step that verifies"
+        + " ownership.";
   }
 
   @Override
@@ -61,17 +62,11 @@ public class SetEmailVerifiedAuthenticatorFactory implements AuthenticatorFactor
   }
 
   @Override
-  public void init(Config.Scope config) {
-    // no-op
-  }
+  public void init(Config.Scope config) {}
 
   @Override
-  public void postInit(KeycloakSessionFactory factory) {
-    // no-op
-  }
+  public void postInit(KeycloakSessionFactory factory) {}
 
   @Override
-  public void close() {
-    // no-op
-  }
+  public void close() {}
 }
