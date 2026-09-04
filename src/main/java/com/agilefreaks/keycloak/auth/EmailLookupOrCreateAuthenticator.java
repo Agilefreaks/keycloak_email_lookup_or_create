@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import org.jboss.logging.Logger;
 import org.keycloak.authentication.AuthenticationFlowContext;
@@ -21,7 +22,9 @@ import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.authentication.Authenticator;
 import org.keycloak.authentication.authenticators.browser.AbstractUsernameFormAuthenticator;
 import org.keycloak.authentication.authenticators.util.AuthenticatorUtils;
+import org.keycloak.events.Errors;
 import org.keycloak.models.AuthenticatorConfigModel;
+import org.keycloak.models.ModelDuplicateException;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -31,19 +34,13 @@ import org.keycloak.services.validation.Validation;
 import org.keycloak.util.JsonSerialization;
 
 /**
- * Passwordless login-or-signup: looks up the user by email and creates one if none exists, setting
- * it on the flow so the following step can verify ownership (e.g. an email/SMS one-time code or a
- * magic link). The optional {@code set-email-verified} authenticator can mark the email verified
- * once that step succeeds.
+ * Passwordless login-or-signup: looks up the user by email and creates one if none exists, leaving
+ * proof of ownership to the step that follows.
  *
- * <p>Works in a browser flow, where it renders the email form and processes the post back, and in a
- * direct grant flow, where the address arrives as the {@code username} form parameter of the token
- * request and errors are returned as OAuth JSON. {@code getFlowPath()} tells the two apart: the
- * resource-owner password grant sets it to {@code token}, and anything else is treated as a form
- * flow, so an unexpected value renders a page rather than leaking one into a token response.
- *
- * <p>The honeypot and CAPTCHA guards only apply to the rendered form; a native client cannot
- * produce either, so rate limiting there belongs to the verification step that follows.
+ * <p>Direct grant is recognised by {@code getFlowPath() == "token"}; anything else is treated as a
+ * form flow, so an unexpected value renders a page rather than leaking one into a token response.
+ * The honeypot and CAPTCHA apply only to the rendered form — a native client cannot produce
+ * either, so rate limiting there belongs to the verification step.
  */
 public class EmailLookupOrCreateAuthenticator implements Authenticator {
 
@@ -67,18 +64,21 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
   static final String DEFAULT_RESPONSE_FIELD = "cf-turnstile-response";
 
   private static final Logger LOG = Logger.getLogger(EmailLookupOrCreateAuthenticator.class);
+  // Kept short: the call blocks a Keycloak worker thread for the whole login submission.
+  private static final Duration CAPTCHA_CONNECT_TIMEOUT = Duration.ofSeconds(2);
+
+  private static final Duration CAPTCHA_REQUEST_TIMEOUT = Duration.ofSeconds(3);
+
   private static final HttpClient HTTP =
-      HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+      HttpClient.newBuilder().connectTimeout(CAPTCHA_CONNECT_TIMEOUT).build();
 
   @Override
   public void authenticate(AuthenticationFlowContext context) {
-    // A cookie (or upstream step) may already have identified the user.
     if (context.getUser() != null) {
       context.success();
       return;
     }
     if (FLOW_PATH_TOKEN.equals(context.getFlowPath())) {
-      // No form to render and no post back to wait for: the address is already in the request.
       directGrant(context);
       return;
     }
@@ -104,7 +104,7 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
       context.challenge(loginForm(context, Messages.INVALID_EMAIL));
       return;
     }
-    email = email.trim().toLowerCase();
+    email = normalize(email);
 
     String secret = config(context, CONFIG_CAPTCHA_SECRET);
     if (secret != null) {
@@ -113,34 +113,52 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
       String verifyUrl =
           firstNonNull(config(context, CONFIG_CAPTCHA_VERIFY_URL), DEFAULT_VERIFY_URL);
       String token = formData.getFirst(responseField);
-      if (token == null || token.isBlank() || !verifyCaptcha(context, secret, verifyUrl, token)) {
+      if (token == null || token.isBlank()) {
+        // Silence is right for a bot, but a secret with no site key renders no widget, so no
+        // token is ever posted and every login loops with nothing in the log to say why.
+        if (config(context, CONFIG_CAPTCHA_SITE_KEY) == null) {
+          LOG.errorf(
+              "%s is set but %s is not, so no CAPTCHA widget is rendered and no token can be"
+                  + " posted: every submission will be rejected",
+              CONFIG_CAPTCHA_SECRET, CONFIG_CAPTCHA_SITE_KEY);
+        } else {
+          LOG.debugf("No CAPTCHA token in the submission; rejecting");
+        }
+        context.challenge(loginForm(context, null));
+        return;
+      }
+      if (!verifyCaptcha(context, secret, verifyUrl, token)) {
         LOG.debugf("CAPTCHA verification failed; rejecting submission");
         context.challenge(loginForm(context, null));
         return;
       }
     }
 
-    context.setUser(findOrCreate(context, email));
+    UserModel user = findOrCreate(context, email);
+    if (user == null) {
+      context.getEvent().error(Errors.INVALID_REGISTRATION);
+      context.challenge(loginForm(context, Messages.INVALID_EMAIL));
+      return;
+    }
+
+    context.setUser(user);
     context.success();
   }
 
-  /**
-   * The direct grant half: the address arrives as a form parameter of the token request, so there
-   * is nothing to render and nothing to wait for. Errors are OAuth JSON, matching the shape
-   * Keycloak's own direct grant authenticators return.
-   */
   private void directGrant(AuthenticationFlowContext context) {
     MultivaluedMap<String, String> formData = context.getHttpRequest().getDecodedFormParameters();
     String raw = firstNonBlank(formData.getFirst(FIELD), formData.getFirst(FIELD_EMAIL));
     if (raw == null) {
+      context.getEvent().error(Errors.USER_NOT_FOUND);
       context.failure(
           AuthenticationFlowError.INVALID_USER,
           jsonError(400, ERROR_INVALID_REQUEST, "Missing parameter: " + FIELD));
       return;
     }
 
-    String email = raw.trim().toLowerCase();
+    String email = normalize(raw);
     if (!Validation.isEmailValid(email)) {
+      context.getEvent().error(Errors.INVALID_REQUEST);
       context.failure(
           AuthenticationFlowError.INVALID_USER,
           jsonError(400, ERROR_INVALID_REQUEST, "Invalid email address"));
@@ -148,14 +166,25 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
     }
 
     UserModel user = findOrCreate(context, email);
+    if (user == null) {
+      context.getEvent().error(Errors.INVALID_REGISTRATION);
+      context.failure(
+          AuthenticationFlowError.UNKNOWN_USER,
+          jsonError(400, ERROR_INVALID_GRANT, "Invalid user credentials"));
+      return;
+    }
 
+    // Event error first, or the LOGIN_ERROR event carries no reason.
     if (!user.isEnabled()) {
+      context.getEvent().error(Errors.USER_DISABLED);
       context.failure(
           AuthenticationFlowError.USER_DISABLED,
           jsonError(400, ERROR_INVALID_GRANT, "Invalid user credentials"));
       return;
     }
-    if (AuthenticatorUtils.getDisabledByBruteForceEventError(context, user) != null) {
+    String bruteForceError = AuthenticatorUtils.getDisabledByBruteForceEventError(context, user);
+    if (bruteForceError != null) {
+      context.getEvent().error(bruteForceError);
       context.failure(
           AuthenticationFlowError.USER_TEMPORARILY_DISABLED,
           jsonError(400, ERROR_INVALID_GRANT, "Invalid user credentials"));
@@ -166,28 +195,51 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
     context.success();
   }
 
-  /** Shared by both flows: the address is already validated and normalized. */
+  /** Null when the user can neither be found nor created. */
   private UserModel findOrCreate(AuthenticationFlowContext context, String email) {
-    // Record the attempted username (used by downstream form headers and login events, and by
-    // Keycloak to attribute a brute-force failure).
+    // Keycloak attributes a brute-force failure to whatever this note holds.
     context.getAuthenticationSession()
         .setAuthNote(AbstractUsernameFormAuthenticator.ATTEMPTED_USERNAME, email);
 
     KeycloakSession session = context.getSession();
     RealmModel realm = context.getRealm();
 
-    UserModel user = session.users().getUserByEmail(realm, email);
-    if (user == null) {
-      user = session.users().getUserByUsername(realm, email);
+    UserModel user;
+    try {
+      user = lookup(session, realm, email);
+    } catch (ModelDuplicateException e) {
+        LOG.warnf(e, "Several users share the address '%s'; cannot pick one", email);
+      return null;
     }
+
     if (user == null) {
-      // New, unverified user; username = email. The next step verifies
-      // ownership; emailVerified is flipped to true after that.
-      user = session.users().addUser(realm, email);
-      user.setEnabled(true);
+      try {
+        user = session.users().addUser(realm, email);
+        user.setEnabled(true);
+        user.setEmail(email);
+      } catch (ModelDuplicateException e) {
+        // Two requests raced for the same new address; the other one won.
+        LOG.debugf("Lost the race creating '%s'; using the existing user", email);
+        try {
+          user = lookup(session, realm, email);
+        } catch (ModelDuplicateException ignored) {
+          user = null;
+        }
+        if (user == null) {
+          LOG.warnf(e, "Could not create or find a user for '%s'", email);
+          return null;
+        }
+      }
+    } else if (user.getEmail() == null || user.getEmail().isBlank()) {
+      // Matched on username: without an address the next step has nothing to verify against.
       user.setEmail(email);
     }
     return user;
+  }
+
+  private static UserModel lookup(KeycloakSession session, RealmModel realm, String email) {
+    UserModel user = session.users().getUserByEmail(realm, email);
+    return user != null ? user : session.users().getUserByUsername(realm, email);
   }
 
   private static Response jsonError(int status, String error, String description) {
@@ -204,6 +256,11 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
     }
   }
 
+  /** Locale-independent: a Turkish default locale maps I to a dotless i. */
+  private static String normalize(String email) {
+    return email.trim().toLowerCase(Locale.ROOT);
+  }
+
   private static String firstNonBlank(String first, String second) {
     if (first != null && !first.isBlank()) {
       return first;
@@ -212,25 +269,37 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
   }
 
   /**
-   * Verifies a CAPTCHA token against the provider's siteverify endpoint. Returns
-   * true on a confirmed pass. Fails <em>open</em> on a network/parse error so a
-   * provider outage cannot block every login — abuse during such a window is
-   * still bounded by the honeypot and the downstream OTP send cooldown.
+   * Fails <em>open</em> when the provider cannot be reached or answers with something other than a
+   * verdict, so an outage cannot block every login. Fails <em>closed</em> on a URL it cannot use:
+   * that never recovers, and the console would go on claiming CAPTCHA was enabled.
    */
   boolean verifyCaptcha(
       AuthenticationFlowContext context, String secret, String verifyUrl, String token) {
+    HttpRequest request;
     try {
       String body =
           "secret=" + enc(secret)
               + "&response=" + enc(token)
               + "&remoteip=" + enc(context.getConnection().getRemoteAddr());
-      HttpRequest request =
+      request =
           HttpRequest.newBuilder(URI.create(verifyUrl))
-              .timeout(Duration.ofSeconds(8))
+              .timeout(CAPTCHA_REQUEST_TIMEOUT)
               .header("Content-Type", "application/x-www-form-urlencoded")
               .POST(HttpRequest.BodyPublishers.ofString(body))
               .build();
+    } catch (IllegalArgumentException e) {
+      LOG.errorf(
+          e, "CAPTCHA verify URL '%s' is not usable; rejecting the submission", verifyUrl);
+      return false;
+    }
+
+    try {
       HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+      if (response.statusCode() != 200) {
+        LOG.warnf(
+            "CAPTCHA verifier returned HTTP %d; allowing submission", response.statusCode());
+        return true;
+      }
       JsonNode json = JsonSerialization.mapper.readTree(response.body());
       return json.path("success").asBoolean(false);
     } catch (Exception e) {
@@ -284,11 +353,9 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
 
   @Override
   public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {
-    // no-op
   }
 
   @Override
   public void close() {
-    // no-op
   }
 }

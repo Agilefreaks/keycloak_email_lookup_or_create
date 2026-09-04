@@ -18,21 +18,20 @@ import org.junit.jupiter.api.Test;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.authentication.authenticators.browser.AbstractUsernameFormAuthenticator;
+import org.keycloak.events.Errors;
+import org.keycloak.events.EventBuilder;
 import org.keycloak.http.HttpRequest;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.ModelDuplicateException;
 import org.keycloak.models.UserProvider;
 import org.keycloak.services.managers.BruteForceProtector;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.util.JsonSerialization;
 import org.mockito.ArgumentCaptor;
 
-/**
- * The same authenticator in a direct grant flow, where the address arrives as a form parameter of
- * the token request. It recognises that flow by {@code getFlowPath() == "token"}; the browser tests
- * leave it unset, which is why they exercise the form path unchanged.
- */
+/** The same authenticator in a direct grant flow ({@code getFlowPath() == "token"}). */
 class EmailLookupOrCreateDirectGrantTest {
 
   private static final String EMAIL = "visitor@example.com";
@@ -43,6 +42,7 @@ class EmailLookupOrCreateDirectGrantTest {
   private UserProvider users;
   private RealmModel realm;
   private AuthenticationSessionModel authSession;
+  private EventBuilder event;
   private MultivaluedMap<String, String> formData;
 
   @BeforeEach
@@ -53,6 +53,7 @@ class EmailLookupOrCreateDirectGrantTest {
     users = mock(UserProvider.class);
     realm = mock(RealmModel.class);
     authSession = mock(AuthenticationSessionModel.class);
+    event = mock(EventBuilder.class);
     HttpRequest httpRequest = mock(HttpRequest.class);
     formData = new MultivaluedHashMap<>();
 
@@ -62,6 +63,7 @@ class EmailLookupOrCreateDirectGrantTest {
     when(ctx.getRealm()).thenReturn(realm);
     when(ctx.getHttpRequest()).thenReturn(httpRequest);
     when(ctx.getAuthenticationSession()).thenReturn(authSession);
+    when(ctx.getEvent()).thenReturn(event);
     when(httpRequest.getDecodedFormParameters()).thenReturn(formData);
   }
 
@@ -113,7 +115,6 @@ class EmailLookupOrCreateDirectGrantTest {
 
     auth.authenticate(ctx);
 
-    // context.form() would blow up on a token request; the guard is that we never reach it.
     verify(ctx, never()).form();
     verify(ctx, never()).challenge(any());
   }
@@ -168,8 +169,7 @@ class EmailLookupOrCreateDirectGrantTest {
 
     auth.authenticate(ctx);
 
-    // A direct grant rejects any user with a pending required action ("Account is not fully set
-    // up"), so adding one here would break token login for every new account.
+    // Direct grant rejects a user with a pending required action.
     verify(created, never()).addRequiredAction(anyString());
     verify(created, never()).addRequiredAction(any(UserModel.RequiredAction.class));
   }
@@ -215,6 +215,71 @@ class EmailLookupOrCreateDirectGrantTest {
     Response response = captureFailure(AuthenticationFlowError.USER_TEMPORARILY_DISABLED);
     assertEquals("invalid_grant", body(response).get("error"));
     verify(ctx, never()).success();
+  }
+
+  @Test
+  void aLostRaceCreatingTheUserUsesTheOneThatWon() {
+    UserModel winner = enabledUser();
+    when(users.getUserByEmail(realm, EMAIL)).thenReturn(null).thenReturn(winner);
+    when(users.addUser(realm, EMAIL)).thenThrow(new ModelDuplicateException("username exists"));
+    formData.putSingle("username", EMAIL);
+
+    auth.authenticate(ctx);
+
+    // Regression: the loser used to get an HTTP 500.
+    verify(ctx).setUser(winner);
+    verify(ctx).success();
+  }
+
+  @Test
+  void refusesWhenSeveralUsersShareTheAddress() {
+    when(users.getUserByEmail(realm, EMAIL))
+        .thenThrow(new ModelDuplicateException("more than one user"));
+    formData.putSingle("username", EMAIL);
+
+    auth.authenticate(ctx);
+
+    assertEquals(400, captureFailure(AuthenticationFlowError.UNKNOWN_USER).getStatus());
+    verify(ctx, never()).success();
+    verify(event).error(Errors.INVALID_REGISTRATION);
+  }
+
+  @Test
+  void fillsInAMissingEmailWhenMatchingOnUsername() {
+    UserModel byUsername = enabledUser();
+    when(byUsername.getEmail()).thenReturn(null);
+    when(users.getUserByEmail(realm, EMAIL)).thenReturn(null);
+    when(users.getUserByUsername(realm, EMAIL)).thenReturn(byUsername);
+    formData.putSingle("username", EMAIL);
+
+    auth.authenticate(ctx);
+
+    verify(byUsername).setEmail(EMAIL);
+    verify(ctx).success();
+  }
+
+  @Test
+  void reportsAnEventErrorBeforeEachRefusal() {
+    UserModel disabled = mock(UserModel.class);
+    when(disabled.isEnabled()).thenReturn(false);
+    when(users.getUserByEmail(realm, EMAIL)).thenReturn(disabled);
+    formData.putSingle("username", EMAIL);
+
+    auth.authenticate(ctx);
+
+    verify(event).error(Errors.USER_DISABLED);
+  }
+
+  @Test
+  void normalisesTheAddressIndependentlyOfTheDefaultLocale() {
+    UserModel existing = enabledUser();
+    when(users.getUserByEmail(realm, "ivan@example.com")).thenReturn(existing);
+    formData.putSingle("username", "IVAN@EXAMPLE.COM");
+
+    auth.authenticate(ctx);
+
+    verify(ctx).setUser(existing);
+    verify(ctx).success();
   }
 
   @Test
