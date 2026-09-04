@@ -18,10 +18,13 @@ import org.junit.jupiter.api.Test;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.authentication.authenticators.browser.AbstractUsernameFormAuthenticator;
+import org.keycloak.events.Errors;
+import org.keycloak.events.EventBuilder;
 import org.keycloak.http.HttpRequest;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.ModelDuplicateException;
 import org.keycloak.models.UserProvider;
 import org.keycloak.services.managers.BruteForceProtector;
 import org.keycloak.sessions.AuthenticationSessionModel;
@@ -43,6 +46,7 @@ class EmailLookupOrCreateDirectGrantTest {
   private UserProvider users;
   private RealmModel realm;
   private AuthenticationSessionModel authSession;
+  private EventBuilder event;
   private MultivaluedMap<String, String> formData;
 
   @BeforeEach
@@ -53,6 +57,7 @@ class EmailLookupOrCreateDirectGrantTest {
     users = mock(UserProvider.class);
     realm = mock(RealmModel.class);
     authSession = mock(AuthenticationSessionModel.class);
+    event = mock(EventBuilder.class);
     HttpRequest httpRequest = mock(HttpRequest.class);
     formData = new MultivaluedHashMap<>();
 
@@ -62,6 +67,7 @@ class EmailLookupOrCreateDirectGrantTest {
     when(ctx.getRealm()).thenReturn(realm);
     when(ctx.getHttpRequest()).thenReturn(httpRequest);
     when(ctx.getAuthenticationSession()).thenReturn(authSession);
+    when(ctx.getEvent()).thenReturn(event);
     when(httpRequest.getDecodedFormParameters()).thenReturn(formData);
   }
 
@@ -215,6 +221,76 @@ class EmailLookupOrCreateDirectGrantTest {
     Response response = captureFailure(AuthenticationFlowError.USER_TEMPORARILY_DISABLED);
     assertEquals("invalid_grant", body(response).get("error"));
     verify(ctx, never()).success();
+  }
+
+  @Test
+  void aLostRaceCreatingTheUserUsesTheOneThatWon() {
+    UserModel winner = enabledUser();
+    when(users.getUserByEmail(realm, EMAIL)).thenReturn(null).thenReturn(winner);
+    when(users.addUser(realm, EMAIL)).thenThrow(new ModelDuplicateException("username exists"));
+    formData.putSingle("username", EMAIL);
+
+    auth.authenticate(ctx);
+
+    // Two requests for the same new address — a double-tapped submit, or a retried token
+    // request — must not surface as a 500 to whichever one loses.
+    verify(ctx).setUser(winner);
+    verify(ctx).success();
+  }
+
+  @Test
+  void refusesWhenSeveralUsersShareTheAddress() {
+    when(users.getUserByEmail(realm, EMAIL))
+        .thenThrow(new ModelDuplicateException("more than one user"));
+    formData.putSingle("username", EMAIL);
+
+    auth.authenticate(ctx);
+
+    assertEquals(400, captureFailure(AuthenticationFlowError.UNKNOWN_USER).getStatus());
+    verify(ctx, never()).success();
+    verify(event).error(Errors.INVALID_REGISTRATION);
+  }
+
+  @Test
+  void fillsInAMissingEmailWhenMatchingOnUsername() {
+    UserModel byUsername = enabledUser();
+    when(byUsername.getEmail()).thenReturn(null);
+    when(users.getUserByEmail(realm, EMAIL)).thenReturn(null);
+    when(users.getUserByUsername(realm, EMAIL)).thenReturn(byUsername);
+    formData.putSingle("username", EMAIL);
+
+    auth.authenticate(ctx);
+
+    // Without an address the next step has nothing to verify against and the login dead-ends.
+    verify(byUsername).setEmail(EMAIL);
+    verify(ctx).success();
+  }
+
+  @Test
+  void reportsAnEventErrorBeforeEachRefusal() {
+    UserModel disabled = mock(UserModel.class);
+    when(disabled.isEnabled()).thenReturn(false);
+    when(users.getUserByEmail(realm, EMAIL)).thenReturn(disabled);
+    formData.putSingle("username", EMAIL);
+
+    auth.authenticate(ctx);
+
+    // Without this the LOGIN_ERROR event carries no reason, so a lockout and a bad address look
+    // identical in the event log.
+    verify(event).error(Errors.USER_DISABLED);
+  }
+
+  @Test
+  void normalisesTheAddressIndependentlyOfTheDefaultLocale() {
+    UserModel existing = enabledUser();
+    when(users.getUserByEmail(realm, "ivan@example.com")).thenReturn(existing);
+    formData.putSingle("username", "IVAN@EXAMPLE.COM");
+
+    auth.authenticate(ctx);
+
+    // A Turkish default locale would lowercase I to a dotless i and miss this user.
+    verify(ctx).setUser(existing);
+    verify(ctx).success();
   }
 
   @Test

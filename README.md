@@ -38,6 +38,7 @@ unexpected value renders a page rather than leaking one into a token response.
 | Address arrives | posted from the rendered form | `username` (or `email`) form parameter of the token request |
 | Errors | field-scoped message, form re-rendered | OAuth JSON — `{"error": "invalid_request" \| "invalid_grant", "error_description": …}` |
 | Honeypot / CAPTCHA | enforced | not applicable; a native client cannot produce either |
+| A rejected honeypot or CAPTCHA | form re-rendered with no message, so a bot learns nothing | — |
 | Disabled and brute-force-locked users | left to Keycloak's own handling later in the flow | rejected here, as Keycloak's built-in direct grant authenticators do |
 
 Beyond that the two are identical: same normalization, same find-or-create, same
@@ -81,6 +82,19 @@ Copy `target/keycloak-email-lookup-or-create.jar` into Keycloak's
 `/opt/keycloak/providers/` (before `kc.sh build` for an optimized image, or the
 providers dir + restart), then add the authenticators to a browser flow — via
 the admin console (Authentication → Flows) or your infrastructure-as-code.
+
+## Notes on the direct grant path
+
+- It creates a user row from unauthenticated input, before any ownership proof, and the honeypot
+  and CAPTCHA do not apply. Anyone who knows a public client id can therefore create one user per
+  request; Keycloak's brute-force protection is keyed per user, so it never engages. Bound it at
+  the edge (a rate limit on the token path) and at the verification step that follows, which is
+  where the send limits live.
+- A rejected honeypot or CAPTCHA re-renders the form with no message on purpose, so a bot learns
+  nothing from the response. Two configuration mistakes look identical to the user, so both are
+  logged: a `captchaSecret` with no `captchaSiteKey` (no widget, so no token is ever posted) logs
+  an error, and a `captchaVerifyUrl` that cannot be parsed rejects the submission rather than
+  quietly disabling the check.
 
 ## Notes
 
