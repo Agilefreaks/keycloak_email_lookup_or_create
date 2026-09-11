@@ -1,10 +1,8 @@
 package com.agilefreaks.keycloak.auth;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -23,16 +21,13 @@ class SetEmailVerifiedAuthenticatorTest {
   private final SetEmailVerifiedAuthenticator auth = new SetEmailVerifiedAuthenticator();
   private final AuthenticationFlowContext ctx = mock(AuthenticationFlowContext.class);
   private final UserModel user = mock(UserModel.class);
-  private final EventBuilder event = mock(EventBuilder.class);
-  private final EventBuilder sideEvent = mock(EventBuilder.class);
+  private final EventBuilder event = mock(EventBuilder.class, RETURNS_SELF);
+  private final EventBuilder sideEvent = mock(EventBuilder.class, RETURNS_SELF);
 
   @BeforeEach
   void stubEvents() {
     when(ctx.getEvent()).thenReturn(event);
     when(event.clone()).thenReturn(sideEvent);
-    when(sideEvent.event(any())).thenReturn(sideEvent);
-    when(sideEvent.user(any(UserModel.class))).thenReturn(sideEvent);
-    when(sideEvent.detail(anyString(), nullable(String.class))).thenReturn(sideEvent);
   }
 
   @Test

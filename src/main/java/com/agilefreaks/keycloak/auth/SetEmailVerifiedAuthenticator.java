@@ -19,7 +19,6 @@ public class SetEmailVerifiedAuthenticator implements Authenticator {
     UserModel user = context.getUser();
     if (user != null && !user.isEmailVerified()) {
       user.setEmailVerified(true);
-      // Only the transition is an event; reaching this step again on a later login is not.
       context
           .getEvent()
           .clone()

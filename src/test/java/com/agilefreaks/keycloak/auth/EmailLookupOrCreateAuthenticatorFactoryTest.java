@@ -15,11 +15,7 @@ class EmailLookupOrCreateAuthenticatorFactoryTest {
         .orElseThrow(() -> new AssertionError("no config property named " + name));
   }
 
-  /**
-   * Regression guard: StripSecretsUtils masks an authenticator config value only when its property
-   * reports isSecret(). ProviderConfigProperty.PASSWORD is a UI type and does not set that flag, so
-   * without this the secret is stored verbatim in every admin-event representation.
-   */
+  /** Regression guard: only isSecret() masks the value in admin events; PASSWORD does not. */
   @Test
   void captchaSecretIsDeclaredSecret() {
     assertTrue(property(EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET).isSecret());

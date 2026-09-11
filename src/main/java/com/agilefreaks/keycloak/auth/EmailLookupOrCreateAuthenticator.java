@@ -209,7 +209,7 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
             .build());
   }
 
-  /** Whether this request is what brought the user into existence. */
+  /** {@code created} is false for the loser of a create race: the user is new, but not by us. */
   private record Resolved(UserModel user, boolean created) {}
 
   /** Null when the user can neither be found nor created. */
@@ -243,8 +243,7 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
       user.setEmail(email);
       return new Resolved(user, true);
     } catch (ModelDuplicateException e) {
-      // Two requests raced for the same new address; the other one won, so this request did not
-      // register anyone and must not report that it did.
+      // Two requests raced for the same new address; the other one won.
       LOG.debugf("Lost the race creating '%s'; using the existing user", email);
       UserModel winner = lookup(users, realm, email);
       if (winner == null) {
