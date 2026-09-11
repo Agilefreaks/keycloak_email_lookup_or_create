@@ -32,15 +32,13 @@ public class EmailLookupOrCreateAuthenticatorFactory implements AuthenticatorFac
                   + "to render the widget. Not used for verification. Leave empty to disable.",
               ProviderConfigProperty.STRING_TYPE,
               ""),
-          // Only the secret flag masks the value in admin events; PASSWORD is just a UI hint.
           new ProviderConfigProperty(
               EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET,
               "CAPTCHA secret",
               "Provider secret used to verify the token server-side. When set, a valid token is "
                   + "required to proceed. Leave empty to disable CAPTCHA verification.",
               ProviderConfigProperty.PASSWORD,
-              "",
-              true),
+              ""),
           new ProviderConfigProperty(
               EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_VERIFY_URL,
               "CAPTCHA verify URL",
