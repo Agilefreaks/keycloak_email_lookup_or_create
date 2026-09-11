@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -43,6 +44,7 @@ class EmailLookupOrCreateDirectGrantTest {
   private RealmModel realm;
   private AuthenticationSessionModel authSession;
   private EventBuilder event;
+  private EventBuilder sideEvent;
   private MultivaluedMap<String, String> formData;
 
   @BeforeEach
@@ -53,6 +55,7 @@ class EmailLookupOrCreateDirectGrantTest {
     realm = mock(RealmModel.class);
     authSession = mock(AuthenticationSessionModel.class);
     event = mock(EventBuilder.class);
+    sideEvent = mock(EventBuilder.class);
     HttpRequest httpRequest = mock(HttpRequest.class);
     formData = new MultivaluedHashMap<>();
 
@@ -63,6 +66,11 @@ class EmailLookupOrCreateDirectGrantTest {
     when(ctx.getHttpRequest()).thenReturn(httpRequest);
     when(ctx.getAuthenticationSession()).thenReturn(authSession);
     when(ctx.getEvent()).thenReturn(event);
+    when(event.clone()).thenReturn(sideEvent);
+    when(event.detail(anyString(), nullable(String.class))).thenReturn(event);
+    when(sideEvent.event(any())).thenReturn(sideEvent);
+    when(sideEvent.user(any(UserModel.class))).thenReturn(sideEvent);
+    when(sideEvent.detail(anyString(), nullable(String.class))).thenReturn(sideEvent);
     when(httpRequest.getDecodedFormParameters()).thenReturn(formData);
   }
 

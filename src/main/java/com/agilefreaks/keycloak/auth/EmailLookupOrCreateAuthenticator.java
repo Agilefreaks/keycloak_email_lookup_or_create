@@ -20,7 +20,10 @@ import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.authentication.Authenticator;
 import org.keycloak.authentication.authenticators.browser.AbstractUsernameFormAuthenticator;
 import org.keycloak.authentication.authenticators.util.AuthenticatorUtils;
+import org.keycloak.events.Details;
 import org.keycloak.events.Errors;
+import org.keycloak.events.EventBuilder;
+import org.keycloak.events.EventType;
 import org.keycloak.models.AuthenticatorConfigModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.ModelDuplicateException;
@@ -53,6 +56,14 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
   static final String CONFIG_CAPTCHA_VERIFY_URL = "captchaVerifyUrl";
   static final String CONFIG_CAPTCHA_RESPONSE_FIELD = "captchaResponseField";
 
+  static final String DETAIL_USER_SOURCE = "moma_user_source";
+  static final String DETAIL_REJECT = "moma_reject";
+  static final String SOURCE_NEW = "new";
+  static final String SOURCE_EXISTING = "existing";
+  static final String REJECT_HONEYPOT = "honeypot";
+  static final String REJECT_CAPTCHA = "captcha";
+  static final String REGISTER_METHOD = "email-otp";
+
   static final String DEFAULT_VERIFY_URL =
       "https://challenges.cloudflare.com/turnstile/v0/siteverify";
   static final String DEFAULT_RESPONSE_FIELD = "cf-turnstile-response";
@@ -82,6 +93,7 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
   public void action(AuthenticationFlowContext context) {
     MultivaluedMap<String, String> formData = context.getHttpRequest().getDecodedFormParameters();
     if (honeypotFilled(context, formData)) {
+      recordReject(context, REJECT_HONEYPOT);
       context.challenge(loginForm(context, null));
       return;
     }
@@ -93,17 +105,19 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
     }
 
     if (!captchaPassed(context, formData)) {
+      recordReject(context, REJECT_CAPTCHA);
       context.challenge(loginForm(context, null));
       return;
     }
 
-    UserModel user = findOrCreate(context, email);
-    if (user == null) {
+    Resolved resolved = findOrCreate(context, email);
+    if (resolved == null) {
       context.getEvent().error(Errors.INVALID_REGISTRATION);
       context.challenge(loginForm(context, Messages.INVALID_EMAIL));
       return;
     }
-    context.setUser(user);
+    context.setUser(resolved.user());
+    recordUserSource(context, resolved, email);
     context.success();
   }
 
@@ -124,12 +138,13 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
       return;
     }
 
-    UserModel user = findOrCreate(context, email);
-    if (user == null) {
+    Resolved resolved = findOrCreate(context, email);
+    if (resolved == null) {
       refuse(context, Errors.INVALID_REGISTRATION, AuthenticationFlowError.UNKNOWN_USER,
           OAuthErrorException.INVALID_GRANT, INVALID_CREDENTIALS);
       return;
     }
+    UserModel user = resolved.user();
     if (!user.isEnabled()) {
       refuse(context, Errors.USER_DISABLED, AuthenticationFlowError.USER_DISABLED,
           OAuthErrorException.INVALID_GRANT, INVALID_CREDENTIALS);
@@ -143,7 +158,39 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
     }
 
     context.setUser(user);
+    recordUserSource(context, resolved, email);
     context.success();
+  }
+
+  /**
+   * Events of our own go on a clone: the flow owns the type of {@code context.getEvent()} and never
+   * sends it on a challenge, and {@code newEvent()} would replace the processor's builder outright.
+   */
+  private static void recordUserSource(
+      AuthenticationFlowContext context, Resolved resolved, String email) {
+    EventBuilder event = context.getEvent();
+    event.detail(DETAIL_USER_SOURCE, resolved.created() ? SOURCE_NEW : SOURCE_EXISTING);
+    if (!resolved.created()) {
+      return;
+    }
+    event
+        .clone()
+        .event(EventType.REGISTER)
+        .user(resolved.user())
+        .detail(Details.REGISTER_METHOD, REGISTER_METHOD)
+        .detail(Details.USERNAME, email)
+        .detail(Details.EMAIL, email)
+        .success();
+  }
+
+  /** A dropped submission that leaves no trace looks identical to a user who walked away. */
+  private static void recordReject(AuthenticationFlowContext context, String reason) {
+    context
+        .getEvent()
+        .clone()
+        .event(EventType.LOGIN)
+        .detail(DETAIL_REJECT, reason)
+        .error(Errors.INVALID_FORM);
   }
 
   private static void refuse(
@@ -162,8 +209,11 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
             .build());
   }
 
+  /** Whether this request is what brought the user into existence. */
+  private record Resolved(UserModel user, boolean created) {}
+
   /** Null when the user can neither be found nor created. */
-  private static UserModel findOrCreate(AuthenticationFlowContext context, String email) {
+  private static Resolved findOrCreate(AuthenticationFlowContext context, String email) {
     // Keycloak attributes a brute-force failure to whatever this note holds.
     context.getAuthenticationSession()
         .setAuthNote(AbstractUsernameFormAuthenticator.ATTEMPTED_USERNAME, email);
@@ -179,27 +229,29 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
         // Matched on username: without an address the next step has nothing to verify against.
         user.setEmail(email);
       }
-      return user;
+      return new Resolved(user, false);
     } catch (ModelDuplicateException e) {
       LOG.warnf(e, "Several users share the address '%s'; cannot pick one", email);
       return null;
     }
   }
 
-  private static UserModel create(UserProvider users, RealmModel realm, String email) {
+  private static Resolved create(UserProvider users, RealmModel realm, String email) {
     try {
       UserModel user = users.addUser(realm, email);
       user.setEnabled(true);
       user.setEmail(email);
-      return user;
+      return new Resolved(user, true);
     } catch (ModelDuplicateException e) {
-      // Two requests raced for the same new address; the other one won.
+      // Two requests raced for the same new address; the other one won, so this request did not
+      // register anyone and must not report that it did.
       LOG.debugf("Lost the race creating '%s'; using the existing user", email);
       UserModel winner = lookup(users, realm, email);
       if (winner == null) {
         LOG.warnf(e, "Could not create or find a user for '%s'", email);
+        return null;
       }
-      return winner;
+      return new Resolved(winner, false);
     }
   }
 

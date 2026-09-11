@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -17,6 +18,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.authenticators.browser.AbstractUsernameFormAuthenticator;
+import org.keycloak.events.Details;
+import org.keycloak.events.Errors;
+import org.keycloak.events.EventBuilder;
+import org.keycloak.events.EventType;
 import org.keycloak.forms.login.LoginFormsProvider;
 import org.keycloak.http.HttpRequest;
 import org.keycloak.models.AuthenticatorConfigModel;
@@ -37,6 +42,8 @@ class EmailLookupOrCreateAuthenticatorTest {
   private LoginFormsProvider form;
   private AuthenticationSessionModel authSession;
   private MultivaluedMap<String, String> formData;
+  private EventBuilder event;
+  private EventBuilder sideEvent;
 
   @BeforeEach
   void setup() {
@@ -49,7 +56,15 @@ class EmailLookupOrCreateAuthenticatorTest {
     HttpRequest httpRequest = mock(HttpRequest.class);
     authSession = mock(AuthenticationSessionModel.class);
     formData = new MultivaluedHashMap<>();
+    event = mock(EventBuilder.class);
+    sideEvent = mock(EventBuilder.class);
 
+    when(ctx.getEvent()).thenReturn(event);
+    when(event.clone()).thenReturn(sideEvent);
+    when(event.detail(anyString(), nullable(String.class))).thenReturn(event);
+    when(sideEvent.event(any())).thenReturn(sideEvent);
+    when(sideEvent.user(any(UserModel.class))).thenReturn(sideEvent);
+    when(sideEvent.detail(anyString(), nullable(String.class))).thenReturn(sideEvent);
     when(ctx.getSession()).thenReturn(session);
     when(session.users()).thenReturn(users);
     when(ctx.getRealm()).thenReturn(realm);
@@ -270,5 +285,71 @@ class EmailLookupOrCreateAuthenticatorTest {
         return result;
       }
     };
+  }
+
+  // --- events -------------------------------------------------------------
+
+  @Test
+  void newUser_emitsRegisterAndReportsSourceAsNew() {
+    formData.putSingle(EmailLookupOrCreateAuthenticator.FIELD, EMAIL);
+    UserModel created = mock(UserModel.class);
+    when(users.addUser(realm, EMAIL)).thenReturn(created);
+
+    auth.action(ctx);
+
+    verify(event)
+        .detail(
+            EmailLookupOrCreateAuthenticator.DETAIL_USER_SOURCE,
+            EmailLookupOrCreateAuthenticator.SOURCE_NEW);
+    verify(sideEvent).event(EventType.REGISTER);
+    verify(sideEvent).detail(Details.REGISTER_METHOD, EmailLookupOrCreateAuthenticator.REGISTER_METHOD);
+    verify(sideEvent).detail(Details.EMAIL, EMAIL);
+    verify(sideEvent).success();
+  }
+
+  @Test
+  void returningUser_reportsSourceAsExistingAndDoesNotRegister() {
+    formData.putSingle(EmailLookupOrCreateAuthenticator.FIELD, EMAIL);
+    when(users.getUserByEmail(realm, EMAIL)).thenReturn(mock(UserModel.class));
+
+    auth.action(ctx);
+
+    verify(event)
+        .detail(
+            EmailLookupOrCreateAuthenticator.DETAIL_USER_SOURCE,
+            EmailLookupOrCreateAuthenticator.SOURCE_EXISTING);
+    verify(sideEvent, never()).event(EventType.REGISTER);
+  }
+
+  @Test
+  void honeypot_isReportedAsARejectedForm() {
+    when(ctx.getAuthenticatorConfig())
+        .thenReturn(new AuthenticatorConfigModel() {
+          {
+            setConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, "website"));
+          }
+        });
+    formData.putSingle(EmailLookupOrCreateAuthenticator.FIELD, EMAIL);
+    formData.putSingle("website", "a-bot-filled-this");
+
+    auth.action(ctx);
+
+    verify(sideEvent).detail(EmailLookupOrCreateAuthenticator.DETAIL_REJECT, "honeypot");
+    verify(sideEvent).error(Errors.INVALID_FORM);
+    verify(ctx, never()).success();
+  }
+
+  /**
+   * Regression guard: newEvent() replaces the processor's builder, losing the client id and auth
+   * method already recorded on it and breaking the flow's terminal LOGIN event.
+   */
+  @Test
+  void neverReplacesTheFlowsEventBuilder() {
+    formData.putSingle(EmailLookupOrCreateAuthenticator.FIELD, EMAIL);
+    when(users.addUser(realm, EMAIL)).thenReturn(mock(UserModel.class));
+
+    auth.action(ctx);
+
+    verify(ctx, never()).newEvent();
   }
 }

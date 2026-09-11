@@ -32,13 +32,17 @@ public class EmailLookupOrCreateAuthenticatorFactory implements AuthenticatorFac
                   + "to render the widget. Not used for verification. Leave empty to disable.",
               ProviderConfigProperty.STRING_TYPE,
               ""),
+          // The trailing `true` is the secret flag, and it is the only thing Keycloak
+          // looks at when masking: PASSWORD is a UI hint, so without it the secret is
+          // stored verbatim in every admin-event representation.
           new ProviderConfigProperty(
               EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_SECRET,
               "CAPTCHA secret",
               "Provider secret used to verify the token server-side. When set, a valid token is "
                   + "required to proceed. Leave empty to disable CAPTCHA verification.",
               ProviderConfigProperty.PASSWORD,
-              ""),
+              "",
+              true),
           new ProviderConfigProperty(
               EmailLookupOrCreateAuthenticator.CONFIG_CAPTCHA_VERIFY_URL,
               "CAPTCHA verify URL",
