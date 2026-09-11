@@ -162,10 +162,7 @@ public class EmailLookupOrCreateAuthenticator implements Authenticator {
     context.success();
   }
 
-  /**
-   * Events of our own go on a clone: the flow owns the type of {@code context.getEvent()} and never
-   * sends it on a challenge, and {@code newEvent()} would replace the processor's builder outright.
-   */
+  /** On a clone: the flow owns its own event's type and never sends it on a challenge. */
   private static void recordUserSource(
       AuthenticationFlowContext context, Resolved resolved, String email) {
     EventBuilder event = context.getEvent();

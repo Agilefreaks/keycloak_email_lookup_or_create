@@ -302,10 +302,7 @@ class EmailLookupOrCreateAuthenticatorTest {
     verify(ctx, never()).success();
   }
 
-  /**
-   * Regression guard: newEvent() replaces the processor's builder, losing the client id and auth
-   * method already recorded on it and breaking the flow's terminal LOGIN event.
-   */
+  /** Regression guard: newEvent() would replace the flow's builder and break its LOGIN event. */
   @Test
   void action_neverReplacesTheFlowsEventBuilder() {
     formData.putSingle("username", EMAIL);
