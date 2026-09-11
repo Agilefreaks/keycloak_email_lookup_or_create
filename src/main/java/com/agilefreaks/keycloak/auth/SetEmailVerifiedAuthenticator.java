@@ -2,6 +2,8 @@ package com.agilefreaks.keycloak.auth;
 
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.Authenticator;
+import org.keycloak.events.Details;
+import org.keycloak.events.EventType;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -17,6 +19,13 @@ public class SetEmailVerifiedAuthenticator implements Authenticator {
     UserModel user = context.getUser();
     if (user != null && !user.isEmailVerified()) {
       user.setEmailVerified(true);
+      context
+          .getEvent()
+          .clone()
+          .event(EventType.VERIFY_EMAIL)
+          .user(user)
+          .detail(Details.EMAIL, user.getEmail())
+          .success();
     }
     context.success();
   }

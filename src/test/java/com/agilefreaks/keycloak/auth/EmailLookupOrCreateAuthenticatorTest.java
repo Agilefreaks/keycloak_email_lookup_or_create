@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -17,6 +18,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.authenticators.browser.AbstractUsernameFormAuthenticator;
+import org.keycloak.events.Details;
+import org.keycloak.events.Errors;
+import org.keycloak.events.EventBuilder;
+import org.keycloak.events.EventType;
 import org.keycloak.forms.login.LoginFormsProvider;
 import org.keycloak.http.HttpRequest;
 import org.keycloak.models.AuthenticatorConfigModel;
@@ -37,6 +42,8 @@ class EmailLookupOrCreateAuthenticatorTest {
   private LoginFormsProvider form;
   private AuthenticationSessionModel authSession;
   private MultivaluedMap<String, String> formData;
+  private EventBuilder event;
+  private EventBuilder sideEvent;
 
   @BeforeEach
   void setup() {
@@ -49,7 +56,11 @@ class EmailLookupOrCreateAuthenticatorTest {
     HttpRequest httpRequest = mock(HttpRequest.class);
     authSession = mock(AuthenticationSessionModel.class);
     formData = new MultivaluedHashMap<>();
+    event = mock(EventBuilder.class, RETURNS_SELF);
+    sideEvent = mock(EventBuilder.class, RETURNS_SELF);
 
+    when(ctx.getEvent()).thenReturn(event);
+    when(event.clone()).thenReturn(sideEvent);
     when(ctx.getSession()).thenReturn(session);
     when(session.users()).thenReturn(users);
     when(ctx.getRealm()).thenReturn(realm);
@@ -180,6 +191,11 @@ class EmailLookupOrCreateAuthenticatorTest {
     auth.action(ctx);
 
     verifyRejected();
+    verify(sideEvent)
+        .detail(
+            EmailLookupOrCreateAuthenticator.DETAIL_REJECT,
+            EmailLookupOrCreateAuthenticator.REJECT_CAPTCHA);
+    verify(sideEvent).error(Errors.INVALID_FORM);
   }
 
   @Test
@@ -236,6 +252,65 @@ class EmailLookupOrCreateAuthenticatorTest {
 
     verify(form, never()).setAttribute(eq("honeypotField"), any());
     verify(form, never()).setAttribute(eq("captchaSiteKey"), any());
+  }
+
+  @Test
+  void action_newUserEmitsRegisterAndReportsSourceAsNew() {
+    formData.putSingle("username", EMAIL);
+    unknownAddress(EMAIL);
+
+    auth.action(ctx);
+
+    verify(event)
+        .detail(
+            EmailLookupOrCreateAuthenticator.DETAIL_USER_SOURCE,
+            EmailLookupOrCreateAuthenticator.SOURCE_NEW);
+    verify(sideEvent).event(EventType.REGISTER);
+    verify(sideEvent)
+        .detail(Details.REGISTER_METHOD, EmailLookupOrCreateAuthenticator.REGISTER_METHOD);
+    verify(sideEvent).detail(Details.EMAIL, EMAIL);
+    verify(sideEvent).success();
+  }
+
+  @Test
+  void action_existingUserReportsSourceAsExisting_noRegister() {
+    formData.putSingle("username", EMAIL);
+    when(users.getUserByEmail(realm, EMAIL)).thenReturn(mock(UserModel.class));
+
+    auth.action(ctx);
+
+    verify(event)
+        .detail(
+            EmailLookupOrCreateAuthenticator.DETAIL_USER_SOURCE,
+            EmailLookupOrCreateAuthenticator.SOURCE_EXISTING);
+    verify(sideEvent, never()).event(EventType.REGISTER);
+  }
+
+  @Test
+  void action_honeypotIsReportedAsARejectedForm() {
+    withConfig(Map.of(EmailLookupOrCreateAuthenticator.CONFIG_HONEYPOT_FIELD, "website"));
+    formData.putSingle("username", EMAIL);
+    formData.putSingle("website", "a-bot-filled-this");
+
+    auth.action(ctx);
+
+    verify(sideEvent)
+        .detail(
+            EmailLookupOrCreateAuthenticator.DETAIL_REJECT,
+            EmailLookupOrCreateAuthenticator.REJECT_HONEYPOT);
+    verify(sideEvent).error(Errors.INVALID_FORM);
+    verify(ctx, never()).success();
+  }
+
+  /** Regression guard: newEvent() would replace the flow's builder and break its LOGIN event. */
+  @Test
+  void action_neverReplacesTheFlowsEventBuilder() {
+    formData.putSingle("username", EMAIL);
+    unknownAddress(EMAIL);
+
+    auth.action(ctx);
+
+    verify(ctx, never()).newEvent();
   }
 
   @Test

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -20,6 +21,7 @@ import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.authentication.authenticators.browser.AbstractUsernameFormAuthenticator;
 import org.keycloak.events.Errors;
 import org.keycloak.events.EventBuilder;
+import org.keycloak.events.EventType;
 import org.keycloak.http.HttpRequest;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.ModelDuplicateException;
@@ -43,6 +45,7 @@ class EmailLookupOrCreateDirectGrantTest {
   private RealmModel realm;
   private AuthenticationSessionModel authSession;
   private EventBuilder event;
+  private EventBuilder sideEvent;
   private MultivaluedMap<String, String> formData;
 
   @BeforeEach
@@ -52,7 +55,8 @@ class EmailLookupOrCreateDirectGrantTest {
     users = mock(UserProvider.class);
     realm = mock(RealmModel.class);
     authSession = mock(AuthenticationSessionModel.class);
-    event = mock(EventBuilder.class);
+    event = mock(EventBuilder.class, RETURNS_SELF);
+    sideEvent = mock(EventBuilder.class, RETURNS_SELF);
     HttpRequest httpRequest = mock(HttpRequest.class);
     formData = new MultivaluedHashMap<>();
 
@@ -63,6 +67,7 @@ class EmailLookupOrCreateDirectGrantTest {
     when(ctx.getHttpRequest()).thenReturn(httpRequest);
     when(ctx.getAuthenticationSession()).thenReturn(authSession);
     when(ctx.getEvent()).thenReturn(event);
+    when(event.clone()).thenReturn(sideEvent);
     when(httpRequest.getDecodedFormParameters()).thenReturn(formData);
   }
 
@@ -154,6 +159,7 @@ class EmailLookupOrCreateDirectGrantTest {
     // Direct grant rejects a user with a pending required action.
     verify(created, never()).addRequiredAction(anyString());
     verify(created, never()).addRequiredAction(any(UserModel.RequiredAction.class));
+    verify(sideEvent).event(EventType.REGISTER);
   }
 
   @Test
@@ -208,6 +214,11 @@ class EmailLookupOrCreateDirectGrantTest {
     // Regression: the loser used to get an HTTP 500.
     verify(ctx).setUser(winner);
     verify(ctx).success();
+    verify(event)
+        .detail(
+            EmailLookupOrCreateAuthenticator.DETAIL_USER_SOURCE,
+            EmailLookupOrCreateAuthenticator.SOURCE_EXISTING);
+    verify(sideEvent, never()).event(EventType.REGISTER);
   }
 
   @Test
